@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = TikSaveAll
 TikSaveAll_FILES = Tweak.xm
-TikSaveAll_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
-TikSaveAll_FRAMEWORKS = UIKit Photos Foundation
+TikSaveAll_CFLAGS = -fobjc-arc -fno-modules -Wno-deprecated-declarations
+TikSaveAll_FRAMEWORKS = UIKit Foundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk

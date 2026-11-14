@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
-#import <Photos/Photos.h>
 
-static NSHashTable *gModels;          // weak refs to every AWEAwemeModel seen
+static NSHashTable *gModels;
 static NSInteger kBtnTag = 0x5A5A;
 
 #pragma mark - Helpers
@@ -15,11 +14,11 @@ static NSString *FirstString(id obj, NSArray<NSString *> *paths) {
     for (NSString *p in paths) {
         id v = SafeKVC(obj, p);
         if ([v isKindOfClass:NSString.class] && [(NSString *)v length]) return v;
+        if ([v isKindOfClass:NSNumber.class]) return [(NSNumber *)v stringValue];
     }
     return nil;
 }
 
-// Returns the best no-watermark/play URL for a video model
 static NSURL *VideoURL(id aweme) {
     NSArray *keys = @[@"video.playAddr.originURLList",
                       @"video.playAddr.urlList",
@@ -53,6 +52,32 @@ static UIViewController *TopVC(void) {
     return vc;
 }
 
+#pragma mark - Saver (no Photos framework needed)
+
+@interface TSASaver : NSObject
++ (instancetype)shared;
+- (void)saveVideoAtPath:(NSString *)path completion:(void (^)(BOOL ok))completion;
+@end
+
+@implementation TSASaver
++ (instancetype)shared {
+    static TSASaver *s; static dispatch_once_t o;
+    dispatch_once(&o, ^{ s = [TSASaver new]; });
+    return s;
+}
+- (void)saveVideoAtPath:(NSString *)path completion:(void (^)(BOOL))completion {
+    void *ctx = (void *)CFBridgingRetain([completion copy]);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UISaveVideoAtPathToSavedPhotosAlbum(path, self,
+            @selector(video:didFinishSavingWithError:contextInfo:), ctx);
+    });
+}
+- (void)video:(NSString *)path didFinishSavingWithError:(NSError *)error contextInfo:(void *)ctx {
+    void (^cb)(BOOL) = (void (^)(BOOL))CFBridgingRelease(ctx);
+    if (cb) cb(error == nil);
+}
+@end
+
 #pragma mark - Downloader
 
 @interface TSADownloader : NSObject
@@ -83,15 +108,13 @@ static UIViewController *TopVC(void) {
             [[session downloadTaskWithRequest:req completionHandler:^(NSURL *loc, NSURLResponse *r, NSError *e) {
                 if (loc && !e) {
                     NSString *name = [NSString stringWithFormat:@"tsa_%@.mp4", AwemeID(awemes[i]) ?: NSUUID.UUID.UUIDString];
-                    NSURL *dest = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
-                    [NSFileManager.defaultManager removeItemAtURL:dest error:nil];
-                    [NSFileManager.defaultManager moveItemAtURL:loc toURL:dest error:nil];
+                    NSString *dest = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
+                    [NSFileManager.defaultManager removeItemAtPath:dest error:nil];
+                    [NSFileManager.defaultManager moveItemAtURL:loc toURL:[NSURL fileURLWithPath:dest] error:nil];
 
-                    [PHPhotoLibrary.sharedPhotoLibrary performChanges:^{
-                        [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:dest];
-                    } completionHandler:^(BOOL success, NSError *err) {
+                    [[TSASaver shared] saveVideoAtPath:dest completion:^(BOOL success) {
                         if (success) ok++; else fail++;
-                        [NSFileManager.defaultManager removeItemAtURL:dest error:nil];
+                        [NSFileManager.defaultManager removeItemAtPath:dest error:nil];
                         dispatch_semaphore_signal(sem);
                     }];
                 } else { fail++; dispatch_semaphore_signal(sem); }
@@ -127,7 +150,6 @@ static UIViewController *TopVC(void) {
 }
 %end
 
-// Profile screen: verify the class name on your build (FLEX / class-dump)
 %hook AWEUserProfileViewController
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -148,19 +170,20 @@ static UIViewController *TopVC(void) {
 
 %new
 - (void)tsa_saveAll {
-    // Determine the profile owner's id
     NSString *uid = FirstString(self, @[@"user.userID", @"user.uid", @"userModel.userID", @"userID"]);
 
     NSMutableArray *list = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
-    @synchronized (gModels) {
-        for (id m in gModels.allObjects) {
-            if (!VideoURL(m)) continue;
-            NSString *aid = AwemeID(m);
-            if (!aid || [seen containsObject:aid]) continue;
-            if (uid && ![AuthorID(m) isEqualToString:uid]) continue;
-            [seen addObject:aid];
-            [list addObject:m];
+    if (gModels) {
+        @synchronized (gModels) {
+            for (id m in gModels.allObjects) {
+                if (!VideoURL(m)) continue;
+                NSString *aid = AwemeID(m);
+                if (!aid || [seen containsObject:aid]) continue;
+                if (uid && ![AuthorID(m) isEqualToString:uid]) continue;
+                [seen addObject:aid];
+                [list addObject:m];
+            }
         }
     }
 
@@ -172,9 +195,6 @@ static UIViewController *TopVC(void) {
         [(UIViewController *)self presentViewController:a animated:YES completion:nil];
         return;
     }
-
-    [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus s) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [TSADownloader downloadAll:list]; });
-    }];
+    [TSADownloader downloadAll:list];
 }
 %end
