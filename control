@@ -1,0 +1,9 @@
+Package: com.example.toksaveall
+Name: TikSaveAll
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Save all loaded videos from a TikTok profile
+Maintainer: you
+Author: you
+Section: Tweaks
+Depends: mobilesubstrate
