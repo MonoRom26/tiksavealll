@@ -11,10 +11,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
+      - name: Fix line endings
         run: |
-          ls /Applications | grep Xcode
-          sudo xcode-select -s /Applications/Xcode_15.4.app
+          for f in control Makefile Tweak.xm TikSaveAll.plist; do
+            tr -d '\r' < "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+          done
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
 
       - name: Install dependencies
         run: brew install ldid make dpkg
@@ -28,7 +32,6 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/theos/sdks.git /tmp/sdks
           cp -R /tmp/sdks/iPhoneOS14.5.sdk $THEOS/sdks/
-          ls $THEOS/sdks
 
       - name: Build package
         run: |
