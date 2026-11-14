@@ -85,13 +85,22 @@ static UIViewController *TopVC(void) {
 + (void)downloadAll:(NSArray *)awemes;
 @end
 
+static volatile BOOL gCancel = NO;
+static NSURLSessionDownloadTask *gTask = nil;
+
 @implementation TSADownloader
 
 + (void)downloadAll:(NSArray *)awemes {
+    gCancel = NO;
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"TikSaveAll"
                          message:[NSString stringWithFormat:@"0 / %lu", (unsigned long)awemes.count]
                   preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleDestructive
+        handler:^(UIAlertAction *a) {
+            gCancel = YES;
+            [gTask cancel];
+        }]];
     [TopVC() presentViewController:alert animated:YES completion:nil];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
@@ -99,6 +108,7 @@ static UIViewController *TopVC(void) {
         __block NSInteger ok = 0, fail = 0;
 
         for (NSUInteger i = 0; i < awemes.count; i++) {
+            if (gCancel) break;
             NSURL *url = VideoURL(awemes[i]);
             if (!url) { fail++; continue; }
 
@@ -106,8 +116,8 @@ static UIViewController *TopVC(void) {
             NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
             [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 14_3 like Mac OS X)" forHTTPHeaderField:@"User-Agent"];
 
-            [[session downloadTaskWithRequest:req completionHandler:^(NSURL *loc, NSURLResponse *r, NSError *e) {
-                if (loc && !e) {
+            gTask = [session downloadTaskWithRequest:req completionHandler:^(NSURL *loc, NSURLResponse *r, NSError *e) {
+                if (loc && !e && !gCancel) {
                     NSString *name = [NSString stringWithFormat:@"tsa_%@.mp4", AwemeID(awemes[i]) ?: NSUUID.UUID.UUIDString];
                     NSString *dest = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
                     [NSFileManager.defaultManager removeItemAtPath:dest error:nil];
@@ -118,20 +128,36 @@ static UIViewController *TopVC(void) {
                         [NSFileManager.defaultManager removeItemAtPath:dest error:nil];
                         dispatch_semaphore_signal(sem);
                     }];
-                } else { fail++; dispatch_semaphore_signal(sem); }
-            }] resume];
+                } else {
+                    if (!gCancel) fail++;
+                    dispatch_semaphore_signal(sem);
+                }
+            }];
+            [gTask resume];
 
             dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+            if (gCancel) break;
             dispatch_async(dispatch_get_main_queue(), ^{
                 alert.message = [NSString stringWithFormat:@"%lu / %lu  (failed: %ld)",
                                  (unsigned long)(i + 1), (unsigned long)awemes.count, (long)fail];
             });
         }
 
+        BOOL cancelled = gCancel;
         dispatch_async(dispatch_get_main_queue(), ^{
-            alert.title = @"Done";
-            alert.message = [NSString stringWithFormat:@"Saved %ld, failed %ld", (long)ok, (long)fail];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            void (^showDone)(void) = ^{
+                UIAlertController *d = [UIAlertController
+                    alertControllerWithTitle:cancelled ? @"Cancelled" : @"Done"
+                    message:[NSString stringWithFormat:@"Saved %ld, failed %ld", (long)ok, (long)fail]
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [d addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [TopVC() presentViewController:d animated:YES completion:nil];
+            };
+            if (alert.presentingViewController) {
+                [alert dismissViewControllerAnimated:YES completion:showDone];
+            } else {
+                showDone();
+            }
         });
     });
 }
@@ -173,7 +199,7 @@ static void TSAAdd(id m) {
 
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.tag = kBtnTag;
-    b.frame = CGRectMake(w.bounds.size.width - 90, 120, 80, 36);
+    b.frame = CGRectMake(10, 120, 80, 36);
     b.backgroundColor = [UIColor colorWithRed:0.9 green:0.1 blue:0.3 alpha:0.9];
     b.layer.cornerRadius = 18;
     b.layer.zPosition = 9999;
