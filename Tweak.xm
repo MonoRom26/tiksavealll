@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 
 static NSHashTable *gModels;
+static void TSAAdd(id m);
 static NSInteger kBtnTag = 0x5A5A;
 
 #pragma mark - Helpers
@@ -136,65 +137,107 @@ static UIViewController *TopVC(void) {
 }
 @end
 
-#pragma mark - Hooks
+#pragma mark - Model tracking
+
+static void TSAAdd(id m) {
+    if (!m) return;
+    if (!gModels) gModels = [NSHashTable weakObjectsHashTable];
+    @synchronized (gModels) { [gModels addObject:m]; }
+}
 
 %hook AWEAwemeModel
-- (id)init {
-    id me = %orig;
-    if (me) {
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{ gModels = [NSHashTable weakObjectsHashTable]; });
-        @synchronized (gModels) { [gModels addObject:me]; }
-    }
-    return me;
-}
+- (id)init { id me = %orig; TSAAdd(me); return me; }
+- (id)initWithDictionary:(id)d error:(id *)e { id me = %orig; TSAAdd(me); return me; }
 %end
 
-%hook AWEUserProfileViewController
+#pragma mark - Floating button
 
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    UIView *v = [(UIViewController *)self view];
-    if ([v viewWithTag:kBtnTag]) return;
+@interface TSAHandler : NSObject
++ (instancetype)shared;
+- (void)tapped;
+- (void)ensureButton;
+@end
+
+@implementation TSAHandler
++ (instancetype)shared {
+    static TSAHandler *s; static dispatch_once_t o;
+    dispatch_once(&o, ^{ s = [TSAHandler new]; });
+    return s;
+}
+
+- (void)ensureButton {
+    UIWindow *w = nil;
+    for (UIWindow *win in UIApplication.sharedApplication.windows)
+        if (win.isKeyWindow) { w = win; break; }
+    if (!w || [w viewWithTag:kBtnTag]) return;
 
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.tag = kBtnTag;
-    b.frame = CGRectMake(v.bounds.size.width - 110, 100, 100, 36);
-    b.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+    b.frame = CGRectMake(w.bounds.size.width - 90, 120, 80, 36);
+    b.backgroundColor = [UIColor colorWithRed:0.9 green:0.1 blue:0.3 alpha:0.9];
     b.layer.cornerRadius = 18;
-    [b setTitle:@"Save All" forState:UIControlStateNormal];
+    b.layer.zPosition = 9999;
+    [b setTitle:@"\u2B07 Save" forState:UIControlStateNormal];
     [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    [b addTarget:self action:@selector(tsa_saveAll) forControlEvents:UIControlEventTouchUpInside];
-    [v addSubview:b];
+    [b addTarget:self action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
+    [w addSubview:b];
 }
 
-%new
-- (void)tsa_saveAll {
-    NSString *uid = FirstString(self, @[@"user.userID", @"user.uid", @"userModel.userID", @"userID"]);
-
-    NSMutableArray *list = [NSMutableArray array];
+- (void)tapped {
+    // group loaded videos by author, pick the author with most videos
+    NSMutableDictionary<NSString *, NSMutableArray *> *byAuthor = [NSMutableDictionary dictionary];
     NSMutableSet *seen = [NSMutableSet set];
+    NSInteger total = 0;
     if (gModels) {
         @synchronized (gModels) {
             for (id m in gModels.allObjects) {
+                total++;
                 if (!VideoURL(m)) continue;
-                NSString *aid = AwemeID(m);
-                if (!aid || [seen containsObject:aid]) continue;
-                if (uid && ![AuthorID(m) isEqualToString:uid]) continue;
+                NSString *aid = AwemeID(m) ?: [NSString stringWithFormat:@"%p", m];
+                if ([seen containsObject:aid]) continue;
                 [seen addObject:aid];
-                [list addObject:m];
+                NSString *au = AuthorID(m) ?: @"unknown";
+                if (!byAuthor[au]) byAuthor[au] = [NSMutableArray array];
+                [byAuthor[au] addObject:m];
             }
         }
     }
 
-    if (!list.count) {
+    NSArray *best = nil;
+    for (NSArray *l in byAuthor.allValues) if (l.count > best.count) best = l;
+
+    if (!best.count) {
+        NSString *msg = [NSString stringWithFormat:
+            @"No videos found (models seen: %ld).\nCurrent screen class:\n%@\n\nOpen a profile, scroll down, then tap again.",
+            (long)total, NSStringFromClass([TopVC() class])];
         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"TikSaveAll"
-            message:@"No videos found. Scroll the profile to load them first."
-            preferredStyle:UIAlertControllerStyleAlert];
+            message:msg preferredStyle:UIAlertControllerStyleAlert];
         [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [(UIViewController *)self presentViewController:a animated:YES completion:nil];
+        [TopVC() presentViewController:a animated:YES completion:nil];
         return;
     }
-    [TSADownloader downloadAll:list];
+
+    UIAlertController *c = [UIAlertController alertControllerWithTitle:@"TikSaveAll"
+        message:[NSString stringWithFormat:@"Save %lu videos?", (unsigned long)best.count]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [c addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [c addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+        [TSADownloader downloadAll:best];
+    }]];
+    [TopVC() presentViewController:c animated:YES completion:nil];
 }
-%end
+@end
+
+%ctor {
+    gModels = [NSHashTable weakObjectsHashTable];
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+        object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                [[TSAHandler shared] ensureButton];
+            });
+    }];
+    // keep the button alive when windows change
+    [NSTimer scheduledTimerWithTimeInterval:3 repeats:YES block:^(NSTimer *t) {
+        [[TSAHandler shared] ensureButton];
+    }];
+}
