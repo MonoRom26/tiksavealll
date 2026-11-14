@@ -7,9 +7,14 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          ls /Applications | grep Xcode
+          sudo xcode-select -s /Applications/Xcode_15.4.app
 
       - name: Install dependencies
         run: brew install ldid make dpkg
@@ -22,7 +27,7 @@ jobs:
       - name: Install iOS SDK
         run: |
           git clone --depth=1 https://github.com/theos/sdks.git /tmp/sdks
-          cp -R /tmp/sdks/iPhoneOS14.5.sdk $THEOS/sdks/ || cp -R /tmp/sdks/iPhoneOS14.*.sdk $THEOS/sdks/
+          cp -R /tmp/sdks/iPhoneOS14.5.sdk $THEOS/sdks/
           ls $THEOS/sdks
 
       - name: Build package
